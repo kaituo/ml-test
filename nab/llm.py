@@ -213,12 +213,13 @@ class ChronosDetector(BaseDetector):
         # `MeanScaleUniformBins` does not implement the ``__call__`` interface
         # of regular HuggingFace tokenizers, so we explicitly encode the
         # prompt to token ids before converting it to a tensor.
-        ids = torch.tensor(self.tok.encode(prompt), dtype=torch.long,
-                           device=self.device).unsqueeze(0)
+        ids = torch.tensor([self.tok.encode(prompt)],
+                                  dtype = torch.long,
+                                  device = self.device)
         with torch.no_grad():
             out = self.model.generate(ids, max_new_tokens=1)
-        pred = float(self.tok.decode(out[0], skip_special_tokens=True)
-                         .split()[-1])
+        pred = float(self.tok.decode(out[0].tolist(), skip_special_tokens=True)
+                     .split()[-1])
 
         err = abs(value - pred)
         self.err_buf.append(err)
