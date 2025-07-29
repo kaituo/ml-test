@@ -300,9 +300,9 @@ DETECTORS = {
 # A convenient, if blunt, rule of thumb is “flag anything >≈3σ”, hence the hard‑coded default threshold=3.0.
 THRESHOLDS = {
     "RCF"    : 0.0,       # any positive grade
-    # "Toto"   : 3.0,       # –logp or z-score style
+    "Toto"   : 3.0,       # –logp or z-score style
     "Chronos": 3.0,
-    "Moirai" : 3.0,
+    #"Moirai" : 3.0,
 }
 
 
