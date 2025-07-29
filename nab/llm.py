@@ -32,7 +32,7 @@ from typing import Iterable, Tuple, List, Dict
 
 CSV_DIR = Path("./")
 
-# ✦  STEP A – choose the five streams ✦
+# ✦  STEP A – choose the five streams ✦
 SELECTED_STREAMS: set[str] = {
     "ec2_cpu_utilization_24ae8d.csv",
     "ec2_network_in_257a54.csv",
@@ -188,9 +188,15 @@ class ChronosDetector(BaseDetector):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.model  = AutoModelForSeq2SeqLM.from_pretrained(
-                          "amazon/chronos-t5-small").to(self.device).eval()
-        self.tok    = AutoTokenizer.from_pretrained("amazon/chronos-t5-small")
+
+        from chronos import MeanScaleUniformBins  # or keep AutoTokenizer + trust_remote_code
+        self.tok = MeanScaleUniformBins.from_pretrained(
+            "amazon/chronos-t5-small"
+        )
+        from transformers import AutoModelForSeq2SeqLM
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+            "amazon/chronos-t5-small"
+        ).to(self.device).eval()
 
         self.ctx : List[float]    = []
         self.err_buf = deque(maxlen=self._ERR_WIN)   # store recent |errors|
