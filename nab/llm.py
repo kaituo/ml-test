@@ -291,9 +291,9 @@ class MoiraiDetector(BaseDetector):
 
 DETECTORS = {
     "RCF"     : lambda: RCFDetector(),            # grade → use 0
-    # "Toto"    : lambda: TotoDetector(),
+    "Toto"    : lambda: TotoDetector(),
     "Chronos" : lambda: ChronosDetector(),
-    "Moirai"  : lambda: MoiraiDetector(),
+    #"Moirai"  : lambda: MoiraiDetector(),
 }
 
 # The evaluate() driver originally expected every detector to emit a “large‑means‑bad” score (e.g., a z‑score or –logp).
