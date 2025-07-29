@@ -76,7 +76,7 @@ def load_nab_streams(
         if name not in limit:
             continue
 
-        df = pd.read_csv(csv_path, names=["timestamp", "value"], header=0)
+        df = pd.read_csv(csv_path, names=["timestamp", "value"], header=0, skiprows=1)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
         label_ts = [pd.to_datetime(s) for s in labels.get(name, [])]
@@ -174,7 +174,6 @@ class TotoDetector(BaseDetector):
 
 # ---------------- 2‑D  Chronos‑T5  (z‑score) --------------------------
 from collections import deque
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 class ChronosDetector(BaseDetector):
     """
@@ -189,13 +188,16 @@ class ChronosDetector(BaseDetector):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        from chronos import MeanScaleUniformBins  # or keep AutoTokenizer + trust_remote_code
-        self.tok = MeanScaleUniformBins.from_pretrained(
-            "amazon/chronos-t5-small"
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+        # let HF download & import the custom tokenizer that lives in the model repo
+        self.tok = AutoTokenizer.from_pretrained(
+                "amazon/chronos-t5-small",
+                trust_remote_code = True,  # <-- crucial
         )
-        from transformers import AutoModelForSeq2SeqLM
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            "amazon/chronos-t5-small"
+                "amazon/chronos-t5-small",
+                trust_remote_code = True,
         ).to(self.device).eval()
 
         self.ctx : List[float]    = []
@@ -281,7 +283,7 @@ class MoiraiDetector(BaseDetector):
 
 DETECTORS = {
     "RCF"     : lambda: RCFDetector(),            # grade → use 0
-    "Toto"    : lambda: TotoDetector(),
+    # "Toto"    : lambda: TotoDetector(),
     "Chronos" : lambda: ChronosDetector(),
     "Moirai"  : lambda: MoiraiDetector(),
 }
@@ -290,7 +292,7 @@ DETECTORS = {
 # A convenient, if blunt, rule of thumb is “flag anything >≈3σ”, hence the hard‑coded default threshold=3.0.
 THRESHOLDS = {
     "RCF"    : 0.0,       # any positive grade
-    "Toto"   : 3.0,       # –logp or z-score style
+    # "Toto"   : 3.0,       # –logp or z-score style
     "Chronos": 3.0,
     "Moirai" : 3.0,
 }
@@ -352,9 +354,11 @@ def evaluate(threshold=3.0):
                 scores.append(s)
                 ts_list.append(ts)
             p,r = stream_metrics(scores, label_ts, ts_list, THRESHOLDS[name])
-            results[name]["tp"] += p * len(label_ts)      # coarse but fine for macro avg
+            results[name]["tp"] += r * len(label_ts)      # coarse but fine for macro avg
             results[name]["fn"] += (1-r) * len(label_ts)
-            results[name]["fp"] += max(0, round(p*len(label_ts)/r) - p*len(label_ts)) if r else 0
+            if p:  # avoid div‑by‑zero
+                fp = r * len(label_ts) * (1 / p - 1)
+                results[name]["fp"] += fp
             gc.collect(); torch.cuda.empty_cache()
 
     # Summarise
