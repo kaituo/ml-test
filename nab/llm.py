@@ -210,7 +210,11 @@ class ChronosDetector(BaseDetector):
 
         # 1‑step forecast
         prompt = " ".join(f"{v:.4f}" for v in self.ctx[-self._CTX:])
-        ids = self.tok(prompt, return_tensors="pt").input_ids.to(self.device)
+        # `MeanScaleUniformBins` does not implement the ``__call__`` interface
+        # of regular HuggingFace tokenizers, so we explicitly encode the
+        # prompt to token ids before converting it to a tensor.
+        ids = torch.tensor(self.tok.encode(prompt), dtype=torch.long,
+                           device=self.device).unsqueeze(0)
         with torch.no_grad():
             out = self.model.generate(ids, max_new_tokens=1)
         pred = float(self.tok.decode(out[0], skip_special_tokens=True)
