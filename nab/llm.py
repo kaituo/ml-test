@@ -23,28 +23,64 @@ from properscoring import crps_ensemble        # for LL‑score ⇒ anomaly
 from lib.python3_8.site_packages.rcf.trcf_model import TRandomCutForestModel as TRCF
 
 
-# ---------------------------------------------------------------------
-# 1.  NAB helpers
-# ---------------------------------------------------------------------
-NAB_ROOT   = Path(os.getenv("NAB_ROOT", "./NAB"))
-CSV_DIR    = NAB_ROOT / "data"
-LABEL_FILE = NAB_ROOT / "labels" / "combined_labels.json"
-with open(LABEL_FILE) as fh:
-    RAW_LABELS: Dict[str, List[List[str]]] = json.load(fh)          # {file: [[start,end],…]}
+# ----------------------------------------------
+# 1.  NAB helpers  (edit ONLY this first block)
+# ----------------------------------------------
+from pathlib import Path
+import pandas as pd
+from typing import Iterable, Tuple, List, Dict
 
-def load_nab_streams() -> Iterable[Tuple[str, pd.DataFrame, List[pd.Timestamp]]]:
+CSV_DIR = Path("./")
+
+# ✦  STEP A – choose the five streams ✦
+SELECTED_STREAMS: set[str] = {
+    "ec2_cpu_utilization_24ae8d.csv",
+    "ec2_network_in_257a54.csv",
+    "ec2_disk_write_bytes_1ef3de.csv",
+    "rds_cpu_utilization_e47b3b.csv",
+    "rds_cpu_utilization_cc0c53.csv",
+}
+
+# ✦  STEP B – place the anomaly‑window *starts* here ✦
+MANUAL_LABELS: Dict[str, List[str]] = {
+    "ec2_cpu_utilization_24ae8d.csv": [
+        "2014-02-26 22:05:00",
+        "2014-02-27 17:15:00",
+    ],
+    "ec2_network_in_257a54.csv": [
+        "2014-04-15 16:44:00",
+    ],
+    "ec2_disk_write_bytes_1ef3de.csv": [
+        "2014-03-10 21:09:00",
+    ],
+    "rds_cpu_utilization_e47b3b.csv": [
+        "2014-04-13 06:52:00",
+        "2014-04-18 23:27:00",
+    ],
+    "rds_cpu_utilization_cc0c53.csv": [
+        "2014-02-25 07:15:00",
+        "2014-02-27 00:50:00",
+    ],
+}
+
+def load_nab_streams(
+    limit: set[str] = SELECTED_STREAMS,
+    labels: Dict[str, List[str]] = MANUAL_LABELS,
+) -> Iterable[Tuple[str, pd.DataFrame, List[pd.Timestamp]]]:
     """
-    Yields (stream_name, df, label_timestamps) where df has timestamp,value columns.
-    Labels are converted to the *start* of each anomaly window (acceptable for
-    5‑minute matching window).
+    Yield (stream_name, df, label_ts) **only** for the CSV files in *limit*.
+    `label_ts` is a list of pd.Timestamp objects built from MANUAL_LABELS.
     """
     for csv_path in CSV_DIR.glob("**/*.csv"):
         name = csv_path.name
-        df   = pd.read_csv(csv_path)
-        df.columns = ["timestamp", "value"]
+        if name not in limit:
+            continue
+
+        df = pd.read_csv(csv_path, names=["timestamp", "value"], header=0)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-        labels = [pd.to_datetime(w[0]) for w in RAW_LABELS.get(name, [])]
-        yield name, df, labels
+
+        label_ts = [pd.to_datetime(s) for s in labels.get(name, [])]
+        yield name, df, label_ts
 
 
 # ---------------------------------------------------------------------
@@ -72,7 +108,7 @@ class RCFDetector(BaseDetector):
                         z_factor=3)
     def update(self, ts, value):
         desc = self.rcf.process(np.array([value], dtype="float64"), 0)
-        return desc.getAnomalyScore()
+        return desc.getAnomalyGrade()
 
 
 # ---------------- 2‑B  Helper to turn *forecast* into anomaly score ---
@@ -89,79 +125,147 @@ NUM_SAMPLES = 128        # used for CRPS fallback
 # ---------------- 2‑C  Toto ------------------------------------------
 from toto.inference.forecaster import TotoForecaster
 from toto.model.toto import Toto
+from toto.data.util.dataset import MaskedTimeseries           # NEW
+
 class TotoDetector(BaseDetector):
     def __init__(self, device=None, **kw):
         super().__init__(**kw)
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-        m = Toto.from_pretrained("Datadog/Toto-Open-Base-1.0").to(self.device).eval()
-        self.fcst = TotoForecaster(m.model)
-        self.ctx  : List[float] = []
+
+        core = Toto.from_pretrained("Datadog/Toto-Open-Base-1.0")\
+                   .to(self.device).eval()
+        self.model = core                       # so .parameters() works
+        self.fcst  = TotoForecaster(core.model)
+
+        self.ctx: List[float] = []
+
     def update(self, ts, value):
+        """
+        Build an ad‑hoc 1‑channel `MaskedTimeseries`, ask Toto for a
+        one‑step‑ahead *median* forecast, and use |actual‑median| as the
+        anomaly score (larger = more anomalous).
+        """
         self.ctx.append(value)
-        if len(self.ctx) < 64:           # warm‑up
+        if len(self.ctx) < 64:          # warm‑up window
             return 0.0
-        ctx = torch.tensor(self.ctx[-512:], dtype=torch.float32, device=self.device).unsqueeze(0)
-        dist = self.fcst.predictive_distribution(ctx)          # Student‑T mixture
-        return nll_score(dist, torch.tensor(value, device=self.device))
+
+        # keep the last 512 points, shape = (channels, time_steps)
+        series = torch.tensor(self.ctx[-512:], dtype=torch.float32,
+                              device=self.device).unsqueeze(0)
+
+        dummy_mask = torch.ones_like(series, dtype=torch.bool)
+        ts_inp = MaskedTimeseries(
+            series          = series,
+            padding_mask    = dummy_mask,
+            id_mask         = torch.zeros_like(series),
+            timestamp_seconds = torch.zeros_like(series),
+            time_interval_seconds = torch.full((1,), 60, device=self.device),
+        )
+
+        fc = self.fcst.forecast(
+            ts_inp, prediction_length=1,
+            num_samples=128, samples_per_batch=128,
+        )
+        μ = fc.median.item()
+        # 84.1% of the mass lies below μ+1σ.
+        σ = fc.quantile(0.84).item() - μ
+        return abs(value - μ) / (σ + 1e-9)
 
 
-# ---------------- 2‑D  Chronos‑T5 ------------------------------------
+# ---------------- 2‑D  Chronos‑T5  (z‑score) --------------------------
+from collections import deque
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
 class ChronosDetector(BaseDetector):
+    """
+    Uses Chronos‑T5‑small for one‑step prediction and converts the absolute
+    error to *z = |err| / σ̂* where σ̂ is the running std‑dev of recent errors.
+    """
+    _CTX      = 256      # last points fed to the model
+    _WARM_UP  = 64       # points before we start emitting scores
+    _ERR_WIN  = 512      # window for std‑dev estimate
+
     def __init__(self, **kw):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.model  = AutoModelForSeq2SeqLM.from_pretrained("amazon/chronos-t5-small")\
-                        .to(self.device).eval()
+        self.model  = AutoModelForSeq2SeqLM.from_pretrained(
+                          "amazon/chronos-t5-small").to(self.device).eval()
         self.tok    = AutoTokenizer.from_pretrained("amazon/chronos-t5-small")
-        self.ctx: List[float] = []
-    def update(self, ts, value):
+
+        self.ctx : List[float]    = []
+        self.err_buf = deque(maxlen=self._ERR_WIN)   # store recent |errors|
+
+    def update(self, ts, value: float) -> float:
         self.ctx.append(value)
-        if len(self.ctx) < 32:
-            return 0
-        #  Chronos tokenises the series as space‑separated ints; keep last 256 pts
-        prompt = " ".join(f"{v:.4f}" for v in self.ctx[-256:])
+        if len(self.ctx) < self._WARM_UP:
+            return 0.0
+
+        # 1‑step forecast
+        prompt = " ".join(f"{v:.4f}" for v in self.ctx[-self._CTX:])
         ids = self.tok(prompt, return_tensors="pt").input_ids.to(self.device)
         with torch.no_grad():
             out = self.model.generate(ids, max_new_tokens=1)
-        pred = float(self.tok.decode(out[0], skip_special_tokens=True).split()[-1])
-        return abs(value - pred)
+        pred = float(self.tok.decode(out[0], skip_special_tokens=True)
+                         .split()[-1])
+
+        err = abs(value - pred)
+        self.err_buf.append(err)
+
+        # robust σ̂ : std of recent absolute errors (+eps to avoid 0)
+        sigma = np.std(self.err_buf) + 1e-9
+        return err / sigma
+
 
 
 # ---------------- 2‑E  TimesFM‑2.0‑500M ------------------------------
-import timesfm
-class TimesFMDetector(BaseDetector):
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.model = timesfm.load_from_hf_hub("google/timesfm-2.0-500m-pytorch")\
-                        .to(self.device).eval()
-        self.ctx: List[float] = []
-    def update(self, ts, value):
-        self.ctx.append(value)
-        if len(self.ctx) < 64:
-            return 0
-        mean, std = self.model.forecast_mean_std(self.ctx[-512:], horizon=1)
-        return zscore(mean.item(), std.item(), value)
+# import timesfm
+# class TimesFMDetector(BaseDetector):
+#     def __init__(self, **kw):
+#         super().__init__(**kw)
+#         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+#         self.model = timesfm.load_from_hf_hub("google/timesfm-2.0-500m-pytorch")\
+#                         .to(self.device).eval()
+#         self.ctx: List[float] = []
+#     def update(self, ts, value):
+#         self.ctx.append(value)
+#         if len(self.ctx) < 64:
+#             return 0
+#         mean, std = self.model.forecast_mean_std(self.ctx[-512:], horizon=1)
+#         return zscore(mean.item(), std.item(), value)s
 
 
-# ---------------- 2‑F  Moirai‑Large ----------------------------------
+# ---------------- 2‑F  Moirai‑Large  (z‑score) -----------------------
 from uni2ts.model.moirai import MoiraiModule
+
 class MoiraiDetector(BaseDetector):
+    """
+    Moirai returns a Distribution object ⇒ we can take its mean & stddev
+    directly and compute a true z‑score: z = |y − μ| / σ.
+    """
+    _CTX      = 400
+    _WARM_UP  = 128
+
     def __init__(self, **kw):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.mod = MoiraiModule.from_pretrained("Salesforce/moirai-1.0-R-large")\
-                     .to(self.device).eval()
-        self.ctx = []
-    def update(self, ts, value):
+        self.model  = MoiraiModule.from_pretrained(
+                          "Salesforce/moirai-1.0-R-large").to(self.device).eval()
+        self.ctx: List[float] = []
+
+    def update(self, ts, value: float) -> float:
         self.ctx.append(value)
-        if len(self.ctx) < 128:
-            return 0
-        ctx_t = torch.tensor(self.ctx[-400:], dtype=torch.float32,
+        if len(self.ctx) < self._WARM_UP:
+            return 0.0
+
+        ctx_t = torch.tensor(self.ctx[-self._CTX:], dtype=torch.float32,
                              device=self.device)[None, :, None]
-        dist  = self.mod(ctx_t, horizon=1)["dist"]
-        return nll_score(dist, torch.tensor(value, device=self.device))
+
+        with torch.no_grad():
+            dist = self.model(ctx_t, horizon=1)["dist"]   # torch.distributions
+
+        mu   = dist.mean.squeeze().item()
+        sigma= dist.stddev.squeeze().item() + 1e-9        # avoid div‑by‑0
+        return abs(value - mu) / sigma
 
 
 # --------------- 2‑G  PatchTST, TTM‑R2, TEMPO, TabPFN‑TS -------------
@@ -170,16 +274,21 @@ class MoiraiDetector(BaseDetector):
 
 
 DETECTORS = {
-    "RCF"      : lambda: RCFDetector(),
-    "Toto"     : lambda: TotoDetector(),
-    "Chronos"  : lambda: ChronosDetector(),
-    "TimesFM"  : lambda: TimesFMDetector(),
-    "Moirai"   : lambda: MoiraiDetector(),
-    # "PatchTST" : lambda: PatchTSTDetector(),
-    # "TTM-R2"   : lambda: TTMDetector(),
-    # "TEMPO"    : lambda: TempoDetector(),
-    # "TabPFN"   : lambda: TabPFNDetector(),
+    "RCF"     : lambda: RCFDetector(),            # grade → use 0
+    "Toto"    : lambda: TotoDetector(),
+    "Chronos" : lambda: ChronosDetector(),
+    "Moirai"  : lambda: MoiraiDetector(),
 }
+
+# The evaluate() driver originally expected every detector to emit a “large‑means‑bad” score (e.g., a z‑score or –logp).
+# A convenient, if blunt, rule of thumb is “flag anything >≈3σ”, hence the hard‑coded default threshold=3.0.
+THRESHOLDS = {
+    "RCF"    : 0.0,       # any positive grade
+    "Toto"   : 3.0,       # –logp or z-score style
+    "Chronos": 3.0,
+    "Moirai" : 3.0,
+}
+
 
 
 # ---------------------------------------------------------------------
@@ -236,7 +345,7 @@ def evaluate(threshold=3.0):
                 results[name]["cnt"]     += 1
                 scores.append(s)
                 ts_list.append(ts)
-            p,r = stream_metrics(scores, label_ts, ts_list, threshold)
+            p,r = stream_metrics(scores, label_ts, ts_list, THRESHOLDS[name])
             results[name]["tp"] += p * len(label_ts)      # coarse but fine for macro avg
             results[name]["fn"] += (1-r) * len(label_ts)
             results[name]["fp"] += max(0, round(p*len(label_ts)/r) - p*len(label_ts)) if r else 0
