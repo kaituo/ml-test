@@ -18,7 +18,7 @@ from typing import List, Dict, Tuple, Iterable
 
 import numpy as np, pandas as pd, torch
 from sklearn.metrics import precision_score, recall_score
-from properscoring import crps_ensemble        # for LL‑score ⇒ anomaly
+from properscoring import crps_ensemble        #for LL‑score ⇒ anomaly
 
 from lib.python3_8.site_packages.rcf.trcf_model import TRandomCutForestModel as TRCF
 
@@ -188,7 +188,7 @@ class ChronosDetector(BaseDetector):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        from chronos.inference.pipeline import BaseChronosPipeline
+        from chronos import BaseChronosPipeline
 
         # This loads *both* the HF model *and* the numeric tokenizer.
         pipe = BaseChronosPipeline.from_pretrained(
