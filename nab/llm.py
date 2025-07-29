@@ -208,33 +208,25 @@ class ChronosDetector(BaseDetector):
         if len(self.ctx) < self._WARM_UP:
             return 0.0
 
-        # Build context on CPU.  Passing a GPU tensor into
-        # context_input_transform causes a device mismatch because the
-        # tokenizer’s boundaries are on CPU:contentReference[oaicite:0]{index=0}.
+        # Build context on CPU
         ctx = torch.tensor(self.ctx[-self._CTX:], dtype=torch.float32).unsqueeze(0)
-
-        # Tokenise on CPU
         token_ids, attention_mask, scale = self.tok.context_input_transform(ctx)
 
-        # Move token IDs and attention mask to the model’s device for generation
+        # Move IDs and masks to the device
         token_ids = token_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
 
-        # Generate one new token on the device
+        # Generate the next token using the *underlying* HF model
         with torch.no_grad():
-            out = self.model.generate(
+            out = self.model.model.generate(  # note: .model.generate(...)
                 input_ids=token_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=1
             )
 
-        # Take the newly generated token (last position) and move it back to CPU
-        new_token = out[:, -1:].unsqueeze(1).to('cpu')  # shape (1, 1, 1)
-
-        # Decode the token back to a real value using output_transform on CPU:contentReference[oaicite:1]{index=1}.
+        new_token = out[:, -1:].unsqueeze(1).to('cpu')
         pred = self.tok.output_transform(new_token, scale)[0, 0, 0].item()
 
-        # Compute anomaly score using running error standard deviation
         err = abs(value - pred)
         self.err_buf.append(err)
         sigma = np.std(self.err_buf) + 1e-9
