@@ -208,29 +208,33 @@ class ChronosDetector(BaseDetector):
         if len(self.ctx) < self._WARM_UP:
             return 0.0
 
-        # Build a numeric context tensor
-        ctx = torch.tensor(self.ctx[-self._CTX:], dtype=torch.float32,
-                           device=self.device).unsqueeze(0)
+        # Build context on CPU.  Passing a GPU tensor into
+        # context_input_transform causes a device mismatch because the
+        # tokenizer’s boundaries are on CPU:contentReference[oaicite:0]{index=0}.
+        ctx = torch.tensor(self.ctx[-self._CTX:], dtype=torch.float32).unsqueeze(0)
 
-        # Convert context to token IDs, attention mask and scale
+        # Tokenise on CPU
         token_ids, attention_mask, scale = self.tok.context_input_transform(ctx)
+
+        # Move token IDs and attention mask to the model’s device for generation
         token_ids = token_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
-        scale = scale.to(self.device)
 
-        # Generate the next token
+        # Generate one new token on the device
         with torch.no_grad():
-            out = self.model.generate(input_ids=token_ids,
-                                      attention_mask=attention_mask,
-                                      max_new_tokens=1)
+            out = self.model.generate(
+                input_ids=token_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=1
+            )
 
-        # Take the new token (last position) and add a fake num_samples dimension
-        new_token = out[:, -1:].unsqueeze(1)  # shape (1, 1, 1)
+        # Take the newly generated token (last position) and move it back to CPU
+        new_token = out[:, -1:].unsqueeze(1).to('cpu')  # shape (1, 1, 1)
 
-        # Decode token back to a real value using output_transform
+        # Decode the token back to a real value using output_transform on CPU:contentReference[oaicite:1]{index=1}.
         pred = self.tok.output_transform(new_token, scale)[0, 0, 0].item()
 
-        # Use the absolute error to compute an anomaly score with running std‑dev
+        # Compute anomaly score using running error standard deviation
         err = abs(value - pred)
         self.err_buf.append(err)
         sigma = np.std(self.err_buf) + 1e-9
