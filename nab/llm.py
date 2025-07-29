@@ -188,18 +188,17 @@ class ChronosDetector(BaseDetector):
         super().__init__(**kw)
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+        from chronos.inference.pipeline import BaseChronosPipeline
 
-        # let HF download & import the custom tokenizer that lives in the model repo
-        self.tok = AutoTokenizer.from_pretrained(
-                "amazon/chronos-t5-small",
-                trust_remote_code = True,
-                use_fast=False
+        # This loads *both* the HF model *and* the numeric tokenizer.
+        pipe = BaseChronosPipeline.from_pretrained(
+                    "amazon/chronos-t5-small",
+                    device_map = None,  # we move it manually next line
+                    torch_dtype = torch.float32,
         )
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                "amazon/chronos-t5-small",
-                trust_remote_code = True,
-        ).to(self.device).eval()
+
+        self.tok = pipe.tokenizer  # MeanScaleUniformBins
+        self.model = pipe.model.to(self.device).eval()  # T5‑style LM
 
         self.ctx : List[float]    = []
         self.err_buf = deque(maxlen=self._ERR_WIN)   # store recent |errors|
