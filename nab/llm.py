@@ -193,7 +193,8 @@ class ChronosDetector(BaseDetector):
         # let HF download & import the custom tokenizer that lives in the model repo
         self.tok = AutoTokenizer.from_pretrained(
                 "amazon/chronos-t5-small",
-                trust_remote_code = True,  # <-- crucial
+                trust_remote_code = True,
+                use_fast=False
         )
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
                 "amazon/chronos-t5-small",
