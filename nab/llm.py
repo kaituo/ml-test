@@ -208,26 +208,33 @@ class ChronosDetector(BaseDetector):
         if len(self.ctx) < self._WARM_UP:
             return 0.0
 
-        # 1‑step forecast
-        prompt = " ".join(f"{v:.4f}" for v in self.ctx[-self._CTX:])
-        # `MeanScaleUniformBins` does not implement the ``__call__`` interface
-        # of regular HuggingFace tokenizers, so we explicitly encode the
-        # prompt to token ids before converting it to a tensor.
-        ids = torch.tensor([self.tok.encode(prompt)],
-                                  dtype = torch.long,
-                                  device = self.device)
-        with torch.no_grad():
-            out = self.model.generate(ids, max_new_tokens=1)
-        pred = float(self.tok.decode(out[0].tolist(), skip_special_tokens=True)
-                     .split()[-1])
+        # Build a numeric context tensor
+        ctx = torch.tensor(self.ctx[-self._CTX:], dtype=torch.float32,
+                           device=self.device).unsqueeze(0)
 
+        # Convert context to token IDs, attention mask and scale
+        token_ids, attention_mask, scale = self.tok.context_input_transform(ctx)
+        token_ids = token_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        scale = scale.to(self.device)
+
+        # Generate the next token
+        with torch.no_grad():
+            out = self.model.generate(input_ids=token_ids,
+                                      attention_mask=attention_mask,
+                                      max_new_tokens=1)
+
+        # Take the new token (last position) and add a fake num_samples dimension
+        new_token = out[:, -1:].unsqueeze(1)  # shape (1, 1, 1)
+
+        # Decode token back to a real value using output_transform
+        pred = self.tok.output_transform(new_token, scale)[0, 0, 0].item()
+
+        # Use the absolute error to compute an anomaly score with running std‑dev
         err = abs(value - pred)
         self.err_buf.append(err)
-
-        # robust σ̂ : std of recent absolute errors (+eps to avoid 0)
         sigma = np.std(self.err_buf) + 1e-9
         return err / sigma
-
 
 
 # ---------------- 2‑E  TimesFM‑2.0‑500M ------------------------------
