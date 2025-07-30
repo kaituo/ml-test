@@ -200,7 +200,7 @@ class TotoDetector(BaseDetector):
         μ = fc.median.item()
         # 84.1% of the mass lies below μ+1σ.
         σ = fc.quantile(0.84).item() - μ
-        grade = abs(value - μ) / (σ + 1e-9), ts
+        grade = abs(value - μ) / (σ + 1e-9)
         if grade <= self.th:
             return grade, None
         return grade, ts
@@ -270,7 +270,7 @@ class ChronosDetector(BaseDetector):
         err = abs(value - pred)
         self.err_buf.append(err)
         sigma = np.std(self.err_buf) + 1e-9
-        grade = err / sigma, ts
+        grade = err / sigma
         if grade <= self.th:
             return grade, None
         return grade, ts
