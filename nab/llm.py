@@ -389,6 +389,11 @@ def evaluate():
     for model_name, init_fn in DETECTORS.items():
         # ❷ probe once for param‑count / mem
         probe = init_fn()
+        if torch.cuda.is_available():
+            # torch.cuda.reset_peak_memory_stats() clears the counter once per detector,
+            # so max_memory_allocated() now reports only usage caused by that detector and the streams it sees.
+            torch.cuda.reset_peak_memory_stats()
+
         if   hasattr(probe, "model"): m = probe.model
         elif hasattr(probe, "mod")  : m = probe.mod
         elif hasattr(probe, "fcst") : m = probe.fcst
@@ -430,6 +435,13 @@ def evaluate():
             avg_ms = 1e3 * stream_lat_sum / stream_cnt
             detail_rows.append((model_name, stream_name, p, r, avg_ms))
 
+            if torch.cuda.is_available():
+                mem_now = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            else:
+                # On CPU-only machines, we fall back to the resident-set size (psutil) and keep the maximum across streams.
+                rss = psutil.Process(os.getpid()).memory_info().rss
+                mem_now = rss / (1024 ** 3)
+            results[model_name]["mem"] = max(results[model_name]["mem"], mem_now)
             gc.collect(); torch.cuda.empty_cache()
 
     summary_rows = []
